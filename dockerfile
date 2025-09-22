@@ -18,7 +18,6 @@ RUN apk add --no-cache \
         perl-dev \
         musl-dev \
         libintl \
-        libintl-dev \
         zlib \
         zlib-dev \
         bzip2 \

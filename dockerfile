@@ -64,7 +64,7 @@ RUN alpineArch="$(uname -m)-linux-musl" \
 # ------------------------------------------------------------
 # Use MIT licensed Alpine as the base image for the final environment
 # shellcheck disable=SC2154
-FROM --platform="linux/${TARGETARCH}" alpine:latest AS perl-alpine-llvm:5.43.2-threaded
+FROM --platform="linux/${TARGETARCH}" alpine:latest AS perl-alpine-llvm
 
 COPY --from=builder /usr/local /usr/local
 

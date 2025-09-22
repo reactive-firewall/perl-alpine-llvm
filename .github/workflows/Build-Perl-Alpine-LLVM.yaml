@@ -1,0 +1,316 @@
+---
+name: Build and Push Docker Image
+run-name: Build ${{ github.ref_name }}
+#
+# "Continuous Integration workflow for building, the project."
+#
+# Jobs included:
+# - build: building the image
+#
+# Required Secrets:
+# NONE
+
+on:  # yamllint disable-line rule:truthy
+  push:
+    branches: ["**"]  # matches any branch
+    tags: ["*"]
+  pull_request:
+    branches: ["**"]
+
+# Declare default permissions as none.
+permissions: {}
+
+jobs:
+  seed:
+    permissions:
+      actions: read
+      contents: read
+      packages: none
+      pull-requests: read
+    runs-on: macos-latest  # Has FreeBSD date (with -j and -f [format] options)
+    outputs:
+      timestamp: ${{ steps.output_time.outputs.perl-timestamp }}
+      perl-timestamp: ${{ steps.output_time.outputs.perl-timestamp }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          submodules: false
+      - id: output_time
+        name: Get Git commit timestamps
+        shell: bash
+        run: |
+          printf "%s\n" "::group::perl-alpine-llvm-env"
+          printf "bootstrap-timestamp=%s\n" $(git log -1 --pretty=%ct) >> "$GITHUB_OUTPUT"
+          printf "TIMESTAMP=%s\n" $(git log -1 --pretty=%ct) >> "$GITHUB_ENV"
+          printf "perl-timestamp=%s %s\n" $(date -j -f "%s" "$(git log -1 --pretty=%ct)" "+%C%y-%d-%m %H:%M:%S") >> "$GITHUB_OUTPUT"
+          printf "%s %s\n" "Perl-Alpine-LLVM will be synced at time of:" $(date -j -f "%s" "$(git log -1 --pretty=%ct)" "+%C%y-%d-%m %H:%M:%S")
+          printf "%s\n" "::endgroup::"
+
+  build:
+    permissions:
+      actions: read
+      contents: read
+      statuses: write
+      packages: write
+      pull-requests: read
+      security-events: none
+    needs: seed
+    strategy:
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-latest
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+          - architecture: arm
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          submodules: false
+
+      - name: Prepare
+        run: |
+          platform=linux/${{ matrix.architecture }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+
+        # QEMU setup only for armv7 emulation
+      - name: Set up QEMU (for armv7)
+        if: ${{ matrix.architecture == 'arm' }}
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+        with:
+          platforms: linux/${{ matrix.architecture }}
+          cleanup: true
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@c1e51972afc2121e065aed6d45c65596fe445f3f # v5.8.0
+        with:
+          context: git
+          images: ghcr.io/reactive-firewall/perl-alpine-llvm
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+          logout: true
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: dockerfile
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ghcr.io/reactive-firewall/perl-alpine-llvm
+          platforms: linux/${{ matrix.architecture }}
+          build-args: |
+            PERL_VERSION=5.43.2
+            PERL_SHA256=202dc989a29e461bef175dc23ac0ba0d7eef49ea10e1fefe696f19ede210dc29
+            TARGETARCH=${{ matrix.architecture }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+          attests: |
+            type=sbom
+            type=provenance
+          sbom: true
+          provenance: mode=max
+          push: true
+          annotations: |
+            index.org.opencontainers.image.title=perl-alpine-llvm
+            index.org.opencontainers.image.description=A drop‑in replacement for the Debian‑based official Perl images when a lightweight, musl‑based, clang‑only environment is required
+            index.org.opencontainers.image.vendor=individual
+            index.org.opencontainers.image.licenses="MIT"
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=true,annotation-index.org.opencontainers.image.description=Multi-arch Perl Alpine LLVM image ${{ matrix.architecture }}
+        env:
+          SOURCE_DATE_EPOCH: ${{ needs.seed.outputs.timestamp }}
+          PERL_VERSION: "5.43.2"
+          PERL_SHA256: "202dc989a29e461bef175dc23ac0ba0d7eef49ea10e1fefe696f19ede210dc29"
+          TARGETARCH: ${{ matrix.architecture }}
+      - name: Export digest
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Logout from Docker Hub
+        run: docker logout
+
+      - name: Upload digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    permissions:
+      actions: read
+      contents: read
+      statuses: write
+      packages: write
+      pull-requests: read
+      security-events: none
+    runs-on: ubuntu-latest
+    needs: build
+    outputs:
+      merge_version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          submodules: false
+
+      - name: Download digests
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+          logout: true
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@c1e51972afc2121e065aed6d45c65596fe445f3f # v5.8.0
+        with:
+          context: git
+          images: ghcr.io/reactive-firewall/perl-alpine-llvm
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+        env:
+          SOURCE_DATE_EPOCH: ${{ needs.seed.outputs.timestamp }}
+
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          SOURCE_DATE_EPOCH: ${{ needs.seed.outputs.timestamp }}
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf 'ghcr.io/reactive-firewall/perl-alpine-llvm@sha256:%s ' *)
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ghcr.io/reactive-firewall/perl-alpine-llvm:${{ steps.meta.outputs.version }}
+
+      - name: Ensure image is pullable locally
+        run: |
+          # ensure the platform-specific image manifest is present locally for Syft/Grype
+          docker pull ghcr.io/reactive-firewall/perl-alpine-llvm:${{ steps.meta.outputs.version }}
+
+      - name: Pull Syft and Grype images
+        run: |
+          # ensure the Syft and Grype images are available
+          docker pull anchore/syft:v1.31.0
+          docker pull anchore/grype:v0.98.0
+
+      - name: Generate SBOM (Syft) for this architecture
+        env:
+          IMAGE: ghcr.io/reactive-firewall/perl-alpine-llvm:${{ steps.meta.outputs.version }}
+        run: |
+          SYFT_IMG=anchore/syft:v1.31.0  # adjust version if desired
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            $SYFT_IMG ${IMAGE} -o spdx-json > sbom.json
+
+      - name: Scan image with Grype (vulnerability) and export results
+        env:
+          IMAGE: ghcr.io/reactive-firewall/perl-alpine-llvm:${{ steps.meta.outputs.version }}
+        run: |
+          GRYPE_IMG=anchore/grype:v0.98.0
+          # run grype against the image and produce JSON output
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            $GRYPE_IMG ${IMAGE} -o json > grype.json || true
+          # (grype exits non-zero on findings; keep the job green by allowing non-zero)
+
+      - name: Upload per-arch SBOM and Grype report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom-and-scan
+          path: |
+            sbom.json
+
+      - name: Logout from Docker Hub
+        run: docker logout
+
+  test:
+    permissions:
+      actions: read
+      contents: read
+      statuses: write
+      packages: read
+      pull-requests: read
+      security-events: none
+    needs: merge
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          submodules: false
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+          logout: true
+      - name: Pull local copy for test
+        run: |
+          docker pull ghcr.io/reactive-firewall/perl-alpine-llvm:${{ needs.merge.outputs.merge_version }}
+      - name: Run Docker test container
+        id: run_container
+        shell: bash
+        run: |
+          docker run -d --name test-container ghcr.io/reactive-firewall/perl-alpine-llvm:${{ needs.merge.outputs.merge_version }} /bin/bash -c "while true; do sleep 30; done"
+          printf "::group::%s\n" "Testing"
+          docker exec test-container /bin/bash -c "which perl" || exit 1
+          docker exec test-container /bin/bash -c "perl --version"
+          printf "::endgroup::\n"
+      - name: Clean up
+        run: |
+          docker stop test-container || true ;
+          docker rm -f test-container
+      - name: Logout from Docker Hub
+        run: docker logout

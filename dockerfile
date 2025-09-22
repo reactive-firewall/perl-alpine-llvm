@@ -54,9 +54,7 @@ RUN alpineArch="$(uname -m)-linux-musl" \
         -Dusedevel -Dversiononly=undef -des \
     && make -j$(nproc) \
     && TEST_JOBS=$(nproc) make test_harness \
-    && make install \
-    # ---- create a stable `perl` symlink ----
-    && ln -s "$(which perl5.${PERL_VERSION%.*})" /usr/local/bin/perl
+    && make install
 
 # ------------------------------------------------------------
 # Runtime stage – minimal Alpine with the compiled Perl

@@ -303,10 +303,10 @@ jobs:
         id: run_container
         shell: bash
         run: |
-          docker run -d --name test-container ghcr.io/reactive-firewall/perl-alpine-llvm:${{ needs.merge.outputs.merge_version }} /bin/bash -c "while true; do sleep 30; done"
+          docker run -d --name test-container ghcr.io/reactive-firewall/perl-alpine-llvm:${{ needs.merge.outputs.merge_version }} /bin/sh -c "while true; do sleep 30; done"
           printf "::group::%s\n" "Testing"
-          docker exec test-container /bin/bash -c "which perl" || exit 1
-          docker exec test-container /bin/bash -c "perl --version"
+          docker exec test-container /bin/sh -c "which perl" || exit 1
+          docker exec test-container /bin/sh -c "perl --version"
           printf "::endgroup::\n"
       - name: Clean up
         run: |
